@@ -1,213 +1,140 @@
-# SmartDrop (frontend)
+# Ajo — Rotating Savings Circles on Stellar
 
-This repository is the **Next.js web app** for SmartDrop, hosted under [**Mainnet-ops/smartdrop-frontend**](https://github.com/Mainnet-ops/smartdrop-frontend). Soroban contracts live in [**smartdrop-contracts**](https://github.com/Mainnet-ops/smartdrop-contracts); the API and indexing service lives in [**smartdrop-backend**](https://github.com/Mainnet-ops/smartdrop-backend).
+**A trustless Ajo/Esusu/Chama/Tanda circle, held by a smart contract instead of a person.**
 
-**SmartDrop** is a liquidity-oriented airdrop experiment on **Stellar**: participants lock **Stellar assets** in **Soroban** farming pools and accrue **airdrop credits** over time instead of passive "click to claim" drops. The goal is to reward people who materially back a project early while discouraging purely extractive behavior.
+Ajo digitizes the rotating savings and credit association (ROSCA) — the informal
+savings circle known by dozens of names across the world (Ajo/Esusu in
+Nigeria, Chama in Kenya, Tanda in Mexico, Susu in Ghana and the Caribbean,
+committee/kameti in South Asia). A fixed group of members each contribute the
+same amount every cycle; one member takes the full pot per cycle, in
+rotation, until everyone's had a turn.
 
----
+The mechanic works. What's always been fragile is the trust model: an
+organizer, or whoever's turn it is to collect, physically holds everyone's
+money until payout. If they vanish, get sick, or spend it, there's no
+recourse — which is why these circles rarely extend past people who already
+know and trust each other.
 
-## What this project is
+Ajo keeps the mechanic and removes that single point of failure. A Soroban
+smart contract custodies the pot instead of a person, enforces the
+contribution schedule, and pays out automatically — trustless by
+construction, not by promise.
 
-At a high level, SmartDrop has two layers:
+- **Network:** Stellar / Soroban, testnet
 
-1. **Smart contracts (Soroban / Rust)** — developed in [**smartdrop-contracts**](https://github.com/Mainnet-ops/smartdrop-contracts)
-   - A **factory** registers or deploys isolated **farming pool** instances per campaign.
-   - Each pool accepts a configurable **staking asset** (classic asset + trustline and/or Soroban token contract, depending on your design). Participants **lock** balances, **earn credits** from elapsed time × amount × rate multipliers, can opt into **boost** rules, and **unlock** when policy allows.
 
-2. **Web app (this repo)**
-   A Chakra UI + Tailwind CSS front end with **Freighter** for wallet connection and Stellar network settings in `src/config/`. The **Farm** flow is wired to **Soroban RPC** (`invoke`, simulation, transaction submission); dashboard numbers reflect live contract state where a factory is configured, and fall back to clear "not available" states otherwise. Off-chain pages (**Prices**, **Airdrops**, **Webhooks**, **Alerts**) call [**smartdrop-backend**](https://github.com/Mainnet-ops/smartdrop-backend) directly over REST — see `src/lib/backend.ts` and `NEXT_PUBLIC_BACKEND_API_URL` below.
+## How it works
 
-### Pages
+1. **Start or join a circle.** Set a contribution amount, a cycle length, and
+   a member count. Join order becomes payout order — fixed the moment the
+   circle fills, verifiable on-chain, no separate randomization step to
+   trust.
+2. **Contribute every cycle.** Once full, every member pays their fixed
+   contribution into the contract each cycle. Wallets sign directly — Ajo
+   never takes custody of a private key.
+3. **The contract pays out automatically.** As soon as every member has
+   contributed (or the cycle deadline passes, so one non-payer can't freeze
+   everyone else's money), the contract releases the full pot to that
+   cycle's member. No organizer collects or distributes anything by hand.
 
-| Route | Talks to | Auth |
-|---|---|---|
-| `/` | Soroban RPC | — |
-| `/farm`, `/farm/[poolId]` | Soroban RPC + Freighter | Wallet (shows total credits badge when connected) |
-| `/history` | Soroban RPC (Horizon) + Freighter | Wallet |
-| `/leaderboard` | Soroban RPC | — |
-| `/contributors` | Static, GitHub API–sourced at build time | — |
-| `/prices` | smartdrop-backend `/prices` | — |
-| `/airdrops` | smartdrop-backend `/airdrops` | — |
-| `/webhooks` | smartdrop-backend `/webhooks` | — |
-| `/alerts` | smartdrop-backend `/alerts` | Backend API key (entered client-side, kept in memory only) |
+## Why this belongs on Stellar
 
-### 🔓 Asset Unlock & Withdrawal System
+- **Fees in fractions of a cent.** A weekly contribution shouldn't cost more
+  in gas than the amount being saved.
+- **The contract holds the pot, not a backend.** Every contribution and
+  payout is a direct transfer between a member's wallet and the Soroban
+  contract — there is no backend in this project with custody of anything.
+- **No trustline setup for the common case.** Circles default to Stellar's
+  native asset, so joining doesn't require a new token trustline first.
+- **A public, permissionless payout history.** Every contribution and payout
+  is a Stellar event log entry — independently verifiable, no dashboard to
+  trust.
 
-- **⏰ Time-Lock Protection**: Assets are locked for a configurable minimum period (default: 7 days)
-- **📊 Partial Unlocks**: Users can unlock portions of their stake while keeping the rest earning
-- **⏱️ Real-Time Countdown**: Live countdown timer shows exactly when assets become unlockable
-- **🔐 Freighter Integration**: Secure transaction signing through Freighter wallet
-- **⚠️ Comprehensive Error Handling**: User-friendly error messages and retry logic
-- **📈 Analytics Tracking**: Full event tracking for unlock actions and outcomes
-- **📱 Mobile Responsive**: Verified overflow-free down to 320px viewports
+## Architecture
 
-**Technical Features:**
-- Minimum unlock validation (0.01 minimum)
-- Wallet connectivity verification
-- Transaction simulation and fee estimation
-- Automatic retry logic for transient failures
-- Real-time UI updates upon confirmation
-- Stellar Expert transaction links
+There is deliberately no backend. The frontend talks to the deployed Soroban
+contract directly over Stellar RPC, and a connected wallet (e.g.
+[Freighter](https://www.freighter.app/)) signs every state-changing call.
+Even circle discovery — "what circles exist?" — is read from the contract's
+own on-chain event log rather than an indexer database, so there's no
+off-chain system whose downtime or dishonesty the trust model has to route
+around. See [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for the reasoning
+behind this and a few other deliberate design choices (join order as payout
+order, the missed-deadline partial-payout behavior).
 
----
+```
+contracts/     Soroban contract (Rust) — circle creation, join, contribute,
+                disburse, all authorized via require_auth().
+frontend/       Next.js web app — landing page and the app itself (create,
+                join, contribute, trigger payout). Talks to the contract
+                directly; no backend.
+sdk/            @ajo/sdk — the same non-custodial client logic that backs
+                the frontend, packaged for any third-party app to use.
+cli/            @ajo/cli — a terminal client built on @ajo/sdk (create,
+                join, contribute, disburse from a script or a shell).
+```
 
-## Design system
-
-- **Chakra UI** provides the component layer, theming tokens (`src/lib/theme.ts`), forms, modals, and the wallet UI.
-- **Tailwind CSS** (utilities only — `preflight` is disabled so it doesn't clash with Chakra's reset) drives layout and responsive breakpoints for newer components, starting with the navbar.
-- Dark-first theme with a brand accent gradient, card-based layouts with hover states, and a custom SVG mark (`src/app/icon.svg`) replacing the default Next.js favicon.
-- The `/contributors` page pulls live commit data from the GitHub API across the three SmartDropLabs repos — no static or borrowed data.
-
----
-
-## Why it matters
-
-Traditional airdrops often optimize for reach, not alignment. SmartDrop reframes distribution around **commitment**:
-
-- **Skin in the game** — Credits accrue from locked assets, not from a one-off signature.
-- **Liquidity and attention** — Projects can target early supporters willing to lock value for a period.
-- **Transparent rules** — Rates and multipliers live in **Soroban** contracts; the app is a window into that state.
-
-This does not replace legal, compliance, or token-design work; it is a **mechanism** teams can study, fork, or extend.
-
----
-
-## Repository layout
-
-| Path | Role |
-|------|------|
-| `src/app/` | Next.js App Router pages (home, farm, history, leaderboard, contributors) |
-| `src/components/` | Shared UI: navbar, footer, wallet button, charts, modals |
-| `src/config/` | Stellar network, Horizon, Soroban RPC, optional factory contract id |
-| `src/data/contributors.json` | Live-synced contributor data (regenerate via the GitHub contributors API) |
-| `src/app/icon.svg` | Favicon / brand mark |
-
-**Stack:** Next.js 15, React 19, TypeScript, Chakra UI, Tailwind CSS, **@stellar/freighter-api**, TanStack Query, Recharts. The app builds as a **static export** (`output: "export"`) so only the front end is shipped — no Node server.
-
----
-
-## Deployments
-
-When your Soroban **factory** is on **Futurenet** or **Stellar Testnet**, publish the contract id and explorer links here and set:
-
-- `NEXT_PUBLIC_FACTORY_CONTRACT_ID`
-- `NEXT_PUBLIC_SOROBAN_RPC_URL` (if not using the default for your network)
-
-### GitHub Pages
-
-Workflow: [`.github/workflows/deploy-github-pages.yml`](./.github/workflows/deploy-github-pages.yml). On every push to `main` it builds and updates the **`gh-pages`** branch.
-
-**One-time setup (required):**
-
-1. Open **`https://github.com/Mainnet-ops/smartdrop-frontend/settings/pages`**
-2. **Build and deployment → Source:** choose **Deploy from a branch** (not "GitHub Actions").
-3. **Branch:** `gh-pages`, folder **`/ (root)`**, then **Save**.
-4. Wait 1–2 minutes after the workflow turns green (**Actions** tab).
-
-**Link:** **`https://mainnet-ops.github.io/smartdrop-frontend/`**
-
-Local preview with the same asset paths: `BASE_PATH=/smartdrop-frontend npm run build` and `npx serve out` → open **`http://localhost:3000/smartdrop-frontend/`**.
-
-### Vercel
-
-1. Sign in at [vercel.com](https://vercel.com) and click **Add New… → Project**.
-2. **Import** `Mainnet-ops/smartdrop-frontend` (or your fork). Leave the root directory as the repo root (where `package.json` lives).
-3. Vercel should detect **Next.js**. `vercel.json` runs **`npm ci`** + **`npm run build`**; **`.npmrc`** enables `legacy-peer-deps` so Chakra + React resolve like your lockfile. The app is a **static export** (`next.config.ts`): no Node server, only HTML/JS/CSS.
-4. Under **Environment Variables**, add any optional `NEXT_PUBLIC_*` values from above (defaults work for testnet without them).
-5. In **Settings → General**, set **Node.js** to **20.x** (see `.nvmrc` / `package.json` `engines`).
-6. **Deploy.** Pushes to the connected branch trigger new deployments.
-
-**Routes:** use **`/leaderboard`**. The old **`/leaderbord`** path still loads a tiny page that redirects to `/leaderboard`.
-
-**Freighter:** For wallet connect on your `*.vercel.app` URL, ensure the site is allowed in Freighter / use a network that matches your `NEXT_PUBLIC_STELLAR_NETWORK` settings.
-
----
-
-## Local development
-
-### Prerequisites
-
-- Node.js 20+ recommended
-- npm (lockfile is `package-lock.json`; `.npmrc` sets `legacy-peer-deps`)
-- [Freighter](https://www.freighter.app/) browser extension for wallet connect
-
-### Setup
+## Quick start
 
 ```bash
-npm ci                # or: npm install
+git clone https://github.com/presidoclintonbased-alt/ajo.git
+cd ajo
+
+# Smart contract
+cd contracts
+cargo test --workspace
+stellar contract build
+
+# Frontend
+cd ../frontend
+npm install
+cp .env.example .env.local
+# fill in NEXT_PUBLIC_AJO_CONTRACT_ID with your deployed contract id
+npm run dev
 ```
 
-Optional `.env.local`:
+See [docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md) for actually deploying the
+contract (there's no upgrade mechanism, so redeploying always means a new
+contract id).
 
-```
-NEXT_PUBLIC_STELLAR_NETWORK=TESTNET
-# NEXT_PUBLIC_HORIZON_URL=https://horizon-testnet.stellar.org
-# NEXT_PUBLIC_SOROBAN_RPC_URL=https://soroban-testnet.stellar.org
-# NEXT_PUBLIC_FACTORY_CONTRACT_ID=C...
-# NEXT_PUBLIC_POOL_CONTRACT_ID=C...            # pool that custodies locked positions
-# NEXT_PUBLIC_MIN_LOCK_PERIOD_SECONDS=604800   # min lock before unlock (default 7 days)
-# NEXT_PUBLIC_BACKEND_API_URL=http://localhost:4000/api/v1   # smartdrop-backend, for /prices /airdrops /webhooks /alerts
-```
+The app runs on `:3000`. Install [Freighter](https://www.freighter.app/),
+switch it to Stellar testnet, and fund a testnet account via
+[the Laboratory](https://laboratory.stellar.org/#account-creator?network=test)
+before creating or joining a circle.
 
-Then, pick one:
+## The contract
 
-```bash
-npm run dev          # frontend only — on-chain pages work, backend pages show a fetch error
-npm run dev:stack    # frontend + smartdrop-backend + an in-memory Redis, all in one command
-```
+`contracts/ajo-circle` — core functions:
 
-`dev:stack` (`scripts/dev-stack.sh`) expects [`smartdrop-backend`](https://github.com/Mainnet-ops/smartdrop-backend) cloned as a sibling directory (`../smartdrop-backend`), or point it elsewhere with `SMARTDROP_BACKEND_DIR=/path npm run dev:stack`. It needs no Docker or system Redis install — the first run installs a small in-memory Redis under `~/.smartdrop-dev/` and reuses it on every subsequent run, along with a persisted admin API key (printed on startup, needed for `/alerts`). Ctrl+C stops all three processes; logs land in `~/.smartdrop-dev/logs/`.
+| Function | What it does |
+|---|---|
+| `create_circle` | Starts a new circle; the creator is its first member. |
+| `join_circle` | Joins a forming circle. Auto-activates once full. |
+| `leave_circle` | A member backs out while still `Forming` — no funds are ever at risk here. |
+| `cancel_circle` | Creator closes out a circle that never filled. |
+| `contribute` | Pays this cycle's contribution into the pot. |
+| `disburse` | Pays out the current cycle's recipient once everyone's paid, or the deadline passes. Callable by anyone — no privileged keeper. |
+| `get_circle` / `has_contributed` / `missed_count` / `total_circles` | Read-only state, including a per-member missed-contribution strike count. |
 
-Open [http://localhost:3000](http://localhost:3000). Production: `npm run build` / `npm start`.
+21 unit tests cover the full rotation (every member paid exactly once,
+circle completion, including a 10-member circle), the missed-deadline path
+(partial payout, strikes accumulating across repeated misses), leave/cancel,
+and every rejected-input case. See `contracts/ajo-circle/src/test.rs`.
 
-### Soroban contracts
+## SDK
 
-See the [**smartdrop-contracts**](https://github.com/Mainnet-ops/smartdrop-contracts) repository. Use the official **Stellar / Soroban** CLI and Rust toolchain to scaffold, test, and deploy; then connect the UI via RPC and Freighter-signed transactions.
+`sdk/` — the same client logic that backs the frontend, packaged as
+`@ajo/sdk` for any third-party app to integrate with directly. See
+[sdk/README.md](./sdk/README.md).
 
-**Never commit** signing keys or sponsor secrets.
+## CLI
 
----
-
-## Security and status
-
-This codebase is **not** presented as audited production infrastructure. Pool economics, boosts, and admin operations must be reviewed for your deployment. Anyone shipping should:
-
-- Run their own review or professional audit
-- Start on **test networks** and conservative parameters
-- Treat privileged functions (`pause`, parameter updates, rescues) as governance-sensitive
-
----
+`cli/` — `@ajo/cli`, a terminal client built on `@ajo/sdk`: create, join,
+leave, cancel, contribute, and disburse from a script or a shell instead of
+the web app. See [cli/README.md](./cli/README.md).
 
 ## Roadmap
 
-| Area | Opportunity |
-|------|----------------|
-| **Soroban pools** | Implement factory + pool in Rust; lock Stellar assets; emit events for indexers. |
-| **Boost & donations** | Wire boosts to explicit token transfer rules in contracts. |
-| **Frontend** | Continue migrating layout/responsive styling to Tailwind. |
-| **Horizon + Soroban** | Optional account balance reads via Horizon alongside contract state. |
-| **Credits visibility** | Total credits badge on farm page header — users no longer need to navigate home to see their balance. |
-
----
-
-## Contributors
-
-SmartDrop is built by the Mainnet-ops org across three repos: this frontend, [`smartdrop-backend`](https://github.com/Mainnet-ops/smartdrop-backend), and [`smartdrop-contracts`](https://github.com/Mainnet-ops/smartdrop-contracts). See **[`CONTRIBUTORS.md`](./CONTRIBUTORS.md)** or the in-app [`/contributors`](https://mainnet-ops.github.io/smartdrop-frontend/contributors) page for the full list, sourced directly from each repo's GitHub contributors API.
-
----
-
-## Contributing
-
-1. **Fork** the repository and branch for your change.
-2. **Discuss** larger design shifts in an issue when helpful.
-3. **Keep PRs focused** — one coherent improvement per pull request.
-4. **Tests** — Add Soroban tests for contract changes; exercise the Next.js app after UI updates.
-5. **Documentation** — Update this README when env vars or deployment steps change.
-
-Please be respectful in issues and reviews.
-
----
-
-## License
-
-Add a root `LICENSE` when you are ready (MIT is common for OSS). Until then, clarify terms in your fork if you distribute the code publicly.
+- Mainnet deployment.
+- Optional off-chain notifications (a cycle deadline is approaching) without
+  weakening the fully on-chain trust model above.
